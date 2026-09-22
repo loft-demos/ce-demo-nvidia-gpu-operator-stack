@@ -1,6 +1,12 @@
 # NVIDIA GPU Operator Stack Demo
 
-Deploy a GPU-enabled tenant cluster with vCluster Platform, Argo CD, NVIDIA GPU Operator, cert-manager, and NVSentinel. CPU workers run service controllers; GPU workers run NVIDIA node agents and GPU workloads. NodeProfiles provide consistent labels and GPU scheduling taints.
+vCluster Platform hands you a complete NVIDIA GPU cluster, not an empty one. A single Stack delivers cert-manager, the NVIDIA GPU Operator, and NVSentinel with the tenant cluster itself, through Argo CD, in dependency order, onto GPU nodes that are already labeled, tainted, and ready for CUDA workloads.
+
+**Stacks** are a recent addition to vCluster Platform, and they are the point of this demo. One `StackTemplate` declares a dependency-aware task graph, each task becomes an Argo CD Application, and a task starts only once every task in its `dependsOn` list reports healthy. Attach that template to a tenant cluster template under `deploy.stacks` and the cluster arrives with its software already converging. No second pipeline, no post-provisioning runbook, no ticket to go install the GPU Operator after the nodes join.
+
+The `demo-gpu` Stack runs cert-manager and the NVIDIA GPU Operator in parallel, then NVSentinel once both are healthy, with per-task timeouts of 10, 45, and 20 minutes. Five parameters flow from the tenant cluster template through the Stack and into each application's Helm values, so one form in the Platform UI configures GPU driver mode, chart versions, the Argo CD project, and node placement across all three applications.
+
+Two NodeProfiles split the workers: `cpu-services` labels its nodes `workload.example.com/pool=cpu-services` and stays untainted, so it carries cert-manager and the service controllers, while `gpu-compute` labels its nodes `workload.example.com/pool=gpu-compute` and carries a permanent `nvidia.com/gpu=true:NoSchedule` taint that reserves GPU workers for NVIDIA node agents and GPU workloads with a matching toleration. Both pools are provisioned from `privateNodes.autoNodes`, each picked by a `nodeTypeSelector` on `vcluster.com/profile` (`xlarge-gpu` for GPU, `small` for CPU), and every placement decision in the stack keys off the pool label plus that taint.
 
 This repository contains the Platform templates and profiles. It uses existing Platform, Argo CD, and node-provider infrastructure; it does not install those prerequisites.
 
@@ -8,18 +14,40 @@ This repository contains the Platform templates and profiles. It uses existing P
 
 | File | Purpose |
 | --- | --- |
-| [node-profiles.yaml](node-profiles.yaml) | `cpu-services` and `gpu-compute` NodeProfiles |
+| [node-profiles.yaml](node-profiles.yaml) | `cpu-services` NodeProfile (pool label only) and `gpu-compute` NodeProfile (pool label plus the `nvidia.com/gpu=true:NoSchedule` taint) |
 | [cert-manager-application-template.yaml](cert-manager-application-template.yaml) | `demo-cert-manager`, with CPU placement for all cert-manager components |
 | [gpu-operator-application-template.yaml](gpu-operator-application-template.yaml) | `demo-gpu-operator`, with CPU controllers and GPU node agents |
 | [nvsentinel-application-template.yaml](nvsentinel-application-template.yaml) | `demo-nvsentinel`, configured for dry-run monitoring |
-| [stack-template.yaml](stack-template.yaml) | `demo-gpu`, which installs cert-manager and GPU Operator in parallel, then NVSentinel |
-| [virtual-cluster-template.yaml](virtual-cluster-template.yaml) | `demo-static-gpu`, which provisions the GPU and CPU worker pools and attaches the stack |
+| [stack-template.yaml](stack-template.yaml) | `demo-gpu`, the Stack: a three-task graph that installs cert-manager and GPU Operator in parallel, then NVSentinel once both are healthy |
+| [virtual-cluster-template.yaml](virtual-cluster-template.yaml) | `demo-static-gpu`, which provisions the GPU and CPU worker pools and attaches the Stack through `deploy.stacks` |
 
 All commands below run from the root of your clone of this repository. No parent repository or sibling directory is needed.
 
+## How the Stack works
+
+A Stack deploys several applications as one dependency-aware unit and defines the order in which they become ready. Two resources carry it:
+
+- **`StackTemplate`** is the reusable, parameterized task graph an administrator publishes once. [stack-template.yaml](stack-template.yaml) is this demo's.
+- **`StackInstance`** is that graph applied to one tenant cluster. Platform creates it when the tenant cluster is provisioned, drives each task, and aggregates the task phases into one status.
+
+Tasks form a directed acyclic graph. Tasks with no dependencies run concurrently; a task with `dependsOn` waits until every task it names is healthy, not merely created. That is the difference between a Stack and a list of Helm installs:
+
+| Task | `dependsOn` | Timeout | Deploys |
+| --- | --- | --- | --- |
+| `cert-manager` | none | 10m | `demo-cert-manager` application template |
+| `gpu-operator` | none | 45m | `demo-gpu-operator` application template |
+| `nvsentinel` | `cert-manager`, `gpu-operator` | 20m | `demo-nvsentinel` application template |
+
+The ordering is load-bearing here. NVSentinel scrapes DCGM at `nvidia-dcgm.gpu-operator.svc:5555`, an endpoint that does not exist until GPU Operator is healthy, and on a fresh node image GPU Operator has a driver to build and validate first. `dependsOn` and the generous 45-minute timeout encode that wait once, in the template, instead of in a runbook or a retry loop.
+
+Parameters flow down the same path. `cpuNodePool`, `argoProject`, `driverPreinstalled`, `gpuOperatorVersion`, and `nvsentinelVersion` are declared on the tenant cluster template, passed to the Stack under `deploy.stacks[].parameters`, and forwarded by each task into its application template. Change `driverPreinstalled` at cluster creation and both GPU Operator and NVSentinel switch driver modes together.
+
+Each task here is an `argoCDApplication`, so Argo CD owns reconciliation and drift correction once the Stack has ordered the rollout. Tasks can also be `app`, creating an `AppInstance`, and a single Stack may mix both.
+
 ## Prerequisites
 
-- vCluster Platform 4.13 with the features and permissions needed for Private Nodes, NodeProfiles, Stacks, and Argo CD integration.
+- vCluster Platform 4.13 with the features and permissions needed for Private Nodes, NodeProfiles, Stacks, and Argo CD integration. Stacks need no separate license feature; the Argo CD task type uses the Argo CD integration you already have.
+- vCluster 0.37 or later for the `deploy.stacks` install path. The template pins `0.37.1`. Older versions hide the Stacks section during tenant cluster creation.
 - An existing Argo CD connector and an Argo CD project that permits the chart sources and destination namespaces.
 - An existing node provider with an available NVIDIA GPU machine, plus at least one CPU worker for the tenant cluster.
 - Platform Private Nodes VPN configured and reachable by workers. The control plane cluster also needs storage for the tenant control-plane PVC. The template enables Flannel for the tenant CNI.
@@ -30,15 +58,23 @@ Default versions are vCluster `0.37.1`, cert-manager `v1.20.3`, GPU Operator `v2
 
 ## Configure your environment
 
-Before applying the manifests, edit [virtual-cluster-template.yaml](virtual-cluster-template.yaml). The checked-in template provisions **both** pools from `privateNodes.autoNodes`: one GPU worker from a Metal3 provider and one CPU worker from a KubeVirt provider. Both provider names are lab-specific, so substitute your own:
+Before applying the manifests, edit [virtual-cluster-template.yaml](virtual-cluster-template.yaml). The checked-in template provisions **both** pools from `privateNodes.autoNodes`: one GPU worker from a Metal3 provider and one CPU worker from a KubeVirt provider. Each pool pairs a `nodeTypeSelector`, which chooses the machine the provider hands out, with a `profile`, which applies that NodeProfile's labels and taints as the node joins:
 
-- Replace the GPU provider `metal3-us-va-blacksburg-dc1` with your provider name.
-- Update the GPU `nodeTypeSelector` to match your GPU node type. The checked-in selector is `vcluster.com/profile In [xlarge-gpu]`.
-- Replace the CPU provider `kubevirt-us-va-blacksburg-dc1` with your provider name. The CPU pool carries no `nodeTypeSelector`, so it accepts whatever node type that provider offers. Add one if your provider serves more than one type.
+| Pool | Provider | `nodeTypeSelector` | `profile` | Node label | Taint |
+| --- | --- | --- | --- | --- | --- |
+| GPU | `metal3-us-va-blacksburg-dc1` | `vcluster.com/profile In [xlarge-gpu]` | `gpu-compute` | `workload.example.com/pool=gpu-compute` | `nvidia.com/gpu=true:NoSchedule` |
+| CPU | `kubevirt-us-va-blacksburg-dc1` | `vcluster.com/profile In [small]` | `cpu-services` | `workload.example.com/pool=cpu-services` | none |
+
+The `vcluster.com/profile` property inside `nodeTypeSelector` names a node type published by the node provider. Despite the name, it is unrelated to the NodeProfile named in `profile`.
+
+Provider names and node type values are lab-specific, so substitute your own:
+
+- Replace the GPU provider `metal3-us-va-blacksburg-dc1` and change its `nodeTypeSelector` to match your GPU node type.
+- Replace the CPU provider `kubevirt-us-va-blacksburg-dc1` and change its `nodeTypeSelector` to match a CPU node type that provider offers. Drop the selector entirely if the provider serves only one type.
 - Keep `profile: gpu-compute` on the GPU pool and `profile: cpu-services` on the CPU pool. These match the NodeProfiles in [node-profiles.yaml](node-profiles.yaml) and drive every placement decision in the stack.
 - Adjust `quantity` on either pool if needed. Both default to one worker and inherit the provider's OS image, SSH keys, and networking.
 
-**Both pools are required.** Without a CPU worker labeled `workload.example.com/pool=cpu-services`, cert-manager and the GPU Operator controller stay Pending. If your CPU capacity comes from a provider that needs an explicit node type, the pool entry looks like this:
+**Both pools are required.** Without a CPU worker labeled `workload.example.com/pool=cpu-services`, cert-manager and the GPU Operator controller stay Pending. A pool entry has this shape:
 
 ```yaml
 - provider: <cpu-vm-node-provider>
@@ -47,7 +83,7 @@ Before applying the manifests, edit [virtual-cluster-template.yaml](virtual-clus
       quantity: 1
       profile: cpu-services
       nodeTypeSelector:
-        - property: <cpu-node-type-property>
+        - property: vcluster.com/profile
           operator: In
           values:
             - <cpu-node-type-value>
@@ -57,7 +93,14 @@ The templates are owned by the `loft-admins` team. Update `spec.owner` if your i
 
 ## Node placement
 
-The `cpu-services` profile sets `workload.example.com/pool=cpu-services` and has no taints. The `gpu-compute` profile sets `workload.example.com/pool=gpu-compute` and the permanent `nvidia.com/gpu=true:NoSchedule` taint.
+Two NodeProfiles in [node-profiles.yaml](node-profiles.yaml) define everything the tenant cluster scheduler sees:
+
+| NodeProfile | Display name | Node label | Taints |
+| --- | --- | --- | --- |
+| `cpu-services` | Demo - CPU Services | `workload.example.com/pool=cpu-services` | none, so any pod may land here |
+| `gpu-compute` | Demo - GPU Compute | `workload.example.com/pool=gpu-compute` | `nvidia.com/gpu=true:NoSchedule`, permanent |
+
+Pods reach a pool through a `nodeSelector` on `workload.example.com/pool`. Anything selecting `gpu-compute` also needs a toleration for the GPU taint. The stack templates use the `key: nvidia.com/gpu, operator: Exists, effect: NoSchedule` form; the demo Job in step 5 spells out the equivalent `operator: Equal, value: "true"` form. The CPU selector below is the `cpuNodePool` parameter value, `cpu-services` by default; the GPU selector is hard-coded to `gpu-compute`.
 
 | Components | Placement |
 | --- | --- |
@@ -111,11 +154,11 @@ kubectl --context "$TENANT_CONTEXT" get nodes
 
 ## Demo flow
 
-### 1. Show the profiles and stack dependencies
+### 1. Show the Stack, then the node profiles
 
-In Platform, open `cpu-services` and `gpu-compute`. Explain how the label identifies each pool and how the GPU taint reserves GPU nodes for pods with matching tolerations.
+Open the `demo-gpu` StackTemplate in Platform and walk the three tasks. cert-manager and GPU Operator have no dependencies and start together; NVSentinel lists both in `dependsOn` and does not start until both report healthy. Each task references an application template instead of carrying its own copy of the Helm values, and the five Stack parameters are the only knobs anyone turns. This is the whole point: the cluster and its GPU software stack are one declarative unit with one lifecycle.
 
-Open the `demo-gpu` stack: cert-manager and GPU Operator start independently; NVSentinel waits for both tasks to become ready. Show the separate application templates and their scheduling values.
+Then open `cpu-services` and `gpu-compute`. Show that both set `workload.example.com/pool` to identify the pool, that `cpu-services` adds no taints, and that the `nvidia.com/gpu=true:NoSchedule` taint on `gpu-compute` reserves GPU nodes for pods with a matching toleration.
 
 ### 2. Create the tenant cluster and watch the workers join
 
@@ -136,7 +179,26 @@ kubectl --context "$TENANT_CONTEXT" get nodes \
 
 Explain that Node Ready and GPU readiness are separate milestones. The CPU worker can run service controllers while NVIDIA initializes the GPU worker.
 
-### 3. Show service placement and NVIDIA initialization
+### 3. Watch the Stack converge
+
+The Stack runs on its own as soon as the tenant cluster is reachable. Find its `StackInstance` in the project namespace, on the Platform management context:
+
+```sh
+kubectl --context "$PLATFORM_CONTEXT" get stackinstances -A
+```
+
+Then follow the aggregate phase and the individual tasks:
+
+```sh
+export STACK_NS=your-project-namespace
+export STACK_NAME=your-stackinstance-name
+kubectl --context "$PLATFORM_CONTEXT" get stackinstance "$STACK_NAME" -n "$STACK_NS" \
+  -o jsonpath='{.status.phase}{"\n"}{range .status.tasks[*]}{.name}{"\t"}{.phase}{"\t"}{.message}{"\n"}{end}'
+```
+
+The aggregate phase moves through `Pending`, `Progressing`, and `Healthy`, and reports `Degraded` when a task fails or exceeds its timeout. Point out the shape of the run: `cert-manager` and `gpu-operator` progress at the same time, `nvsentinel` sits idle until both are healthy, and no one has touched the cluster since creating it. The Platform UI shows the same graph and the same phases.
+
+### 4. Show service placement and NVIDIA initialization
 
 ```sh
 kubectl --context "$TENANT_CONTEXT" get pods -n cert-manager -o wide
@@ -155,7 +217,7 @@ kubectl --context "$TENANT_CONTEXT" get nodes -o json \
   | jq '.items[] | {name: .metadata.name, pool: .metadata.labels["workload.example.com/pool"], gpus: (.status.allocatable["nvidia.com/gpu"] // "0")}'
 ```
 
-### 4. Run a CUDA workload on the GPU pool
+### 5. Run a CUDA workload on the GPU pool
 
 This uses NVIDIA's [CUDA VectorAdd sample](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/26.3/getting-started.html#cuda-vectoradd), with the pool selector and taint toleration added. The sample expects a full GPU exposed as `nvidia.com/gpu`.
 
@@ -195,9 +257,9 @@ kubectl --context "$TENANT_CONTEXT" -n default get pods \
 
 Expected result: the Job completes on the GPU worker and its logs include `Test PASSED`. The selector chooses the pool, the toleration permits placement on the tainted node, and the resource limit requests one GPU.
 
-For an initialization demo, submit this Job during step 3, before the device plugin advertises GPUs. It can remain Pending with an `Insufficient nvidia.com/gpu` event until capacity appears. Use `kubectl --context "$TENANT_CONTEXT" -n default describe pods -l job-name=cuda-vectoradd` to show the actual scheduling reason. This waiting phase may be brief and is not a gate on completion of every NVIDIA component.
+For an initialization demo, submit this Job during step 4, before the device plugin advertises GPUs. It can remain Pending with an `Insufficient nvidia.com/gpu` event until capacity appears. Use `kubectl --context "$TENANT_CONTEXT" -n default describe pods -l job-name=cuda-vectoradd` to show the actual scheduling reason. This waiting phase may be brief and is not a gate on completion of every NVIDIA component.
 
-### 5. Show NVSentinel monitoring
+### 6. Show NVSentinel monitoring
 
 Once the preceding stack tasks are ready:
 
@@ -212,20 +274,20 @@ Show the labeler on the CPU pool and the node-local monitors on GPU workers. Som
 
 NVSentinel is configured for dry-run monitoring. Quarantine, draining, remediation, Janitor, and MongoDB are disabled, so this demo does not demonstrate automatic fault recovery. GPU Operator provides DCGM at `nvidia-dcgm.gpu-operator.svc:5555`; Prometheus PodMonitor/ServiceMonitor creation is disabled.
 
-### 6. Clean up the sample
+### 7. Clean up the sample
 
 ```sh
 kubectl --context "$TENANT_CONTEXT" -n default delete job cuda-vectoradd
 ```
 
-Delete the sample Job before repeating step 4. Keep the tenant cluster for further demonstrations, or delete it through Platform when finished; node deprovisioning follows your provider's configuration.
+Delete the sample Job before repeating step 5. Keep the tenant cluster for further demonstrations, or delete it through Platform when finished; node deprovisioning follows your provider's configuration.
 
 ## Troubleshooting
 
 - **cert-manager or operator controller Pending:** confirm a CPU worker has the `cpu-services` pool label. These pods intentionally cannot use the GPU pool.
 - **GPU agents missing:** confirm NVIDIA hardware discovery labels and matching tolerations. Inspect the GPU Operator pod events and logs.
 - **CUDA Job Pending:** inspect its pod events. Check GPU capacity, the pool label, and whether another workload already occupies the GPU.
-- **Stack waiting or failing:** inspect StackInstance task status, the tenant cluster's `StacksSynced` condition, and the corresponding Argo CD applications. Task timeouts are 10 minutes for cert-manager, 45 minutes for GPU Operator, and 20 minutes for NVSentinel.
+- **Stack waiting or failing:** read the `StackInstance` task phases with the jsonpath command in step 3. A task stuck in `Pending` is waiting on its `dependsOn` list; a `Degraded` task names its reason in `message`. Then check the tenant cluster's `StacksSynced` condition and the corresponding Argo CD applications. Task timeouts are 10 minutes for cert-manager, 45 minutes for GPU Operator, and 20 minutes for NVSentinel.
 - **Chart or image download failures:** check registry access and credentials from Argo CD and the worker nodes. Local rendering does not prove that the deployed cluster can pull artifacts.
 - **A template parameter change did not reach an existing tenant cluster:** a `VirtualClusterInstance` keeps the parameter values rendered at creation time. Editing a template's parameters reaches new tenant clusters only; existing ones render the new reference as an empty string with no error anywhere. Use **Sync Template** on the instance in the Platform UI, or set `spec.templateRef.syncOnce: true`.
 
