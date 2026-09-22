@@ -1,0 +1,101 @@
+apiVersion: management.loft.sh/v1
+kind: VirtualClusterTemplate
+metadata:
+  name: demo-static-gpu
+spec:
+  displayName: Demo - Static GPU Nodes
+  description: Fixed-size Metal3 GPU pool with GPU Operator and NVSentinel delivered by a Stack.
+  owner:
+    team: loft-admins
+  parameters:
+    - variable: cpuNodePool
+      label: CPU Service Pool Label
+      description: Value of workload.example.com/pool on CPU service workers.
+      type: string
+      required: true
+      defaultValue: cpu-services
+    - variable: argoConnector
+      label: Argo CD Connector
+      description: Existing Platform Argo CD connector name.
+      type: string
+      required: true
+    - variable: argoProject
+      label: Argo CD Project
+      type: string
+      defaultValue: default
+    - variable: driverPreinstalled
+      label: NVIDIA Driver Preinstalled
+      type: boolean
+      defaultValue: "false"
+    - variable: gpuOperatorVersion
+      label: GPU Operator Version
+      type: string
+      defaultValue: v26.3.3
+    - variable: nvsentinelVersion
+      label: NVSentinel Chart and Image Version
+      type: string
+      defaultValue: v1.13.0
+  template:
+    pro:
+      enabled: true
+    helmRelease:
+      chart:
+        name: vcluster
+        repo: https://charts.loft.sh
+        version: "0.37.1"
+      values: |-
+        privateNodes:
+          enabled: true
+          # Workers reach the control plane through the Platform VPN.
+          vpn:
+            enabled: true
+          autoNodes:
+            - provider: metal3-us-va-blacksburg-dc1
+              static:
+                - name: gpu
+                  profile: gpu-compute
+                  # This lab has one GPU machine available for private nodes.
+                  quantity: 1
+                  nodeTypeSelector:
+                    - property: vcluster.com/profile
+                      operator: In
+                      values:
+                        - xlarge-gpu
+              # Inherit OS image, SSH keys, and network configuration from the provider.
+            - provider: kubevirt-us-va-blacksburg-dc1
+              static:
+                - name: metal3-us-va-blacksburg-dc1
+                  profile: cpu-services
+                  quantity: 1
+                  nodeTypeSelector:
+                    - property: vcluster.com/profile
+                      operator: In
+                      values:
+                        - small
+
+        controlPlane:
+          backingStore:
+            etcd:
+              embedded:
+                enabled: true
+
+        integrations:
+          argoCD:
+            enabled: true
+            connector: {{ .Values.argoConnector | quote }}
+
+        deploy:
+          cni:
+            flannel:
+              enabled: true
+          stacks:
+            - name: gpu
+              displayName: Demo - GPU Stack
+              templateRef:
+                name: demo-gpu
+              parameters:
+                cpuNodePool: {{ .Values.cpuNodePool | quote }}
+                argoProject: {{ .Values.argoProject | quote }}
+                driverPreinstalled: {{ .Values.driverPreinstalled | toString | quote }}
+                gpuOperatorVersion: {{ .Values.gpuOperatorVersion | quote }}
+                nvsentinelVersion: {{ .Values.nvsentinelVersion | quote }}
