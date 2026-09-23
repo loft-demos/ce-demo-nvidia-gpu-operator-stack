@@ -87,7 +87,7 @@ Each task here is an `argoCDApplication`, so Argo CD owns reconciliation and dri
 
 ## The gpuready gate
 
-The GPU Operator Application goes `Healthy` as soon as Argo CD has created its resources. That is minutes to an hour before a driver is built, the device plugin has registered, and the scheduler will admit a pod asking for `nvidia.com/gpu`. Anything depending on GPU Operator being *useful* rather than merely installed needs a stronger signal, and a custom Argo CD health check cannot travel inside a Stack.
+The GPU Operator Application goes `Healthy` as soon as Argo CD has created its resources. That is minutes to an hour before a driver is built, the device plugin has registered, and the scheduler will admit a pod asking for `nvidia.com/gpu`. Anything depending on GPU Operator being *useful* rather than merely installed needs a stronger signal. A custom Argo CD health check cannot supply it: it is a pure function of one resource the Application manages, so it cannot sum allocatable GPUs across the node set, cannot read resources the Application does not own, and cannot publish what it learned.
 
 So the Stack derives the signal from a kind Argo CD already understands. Argo CD's built-in Job health reports `Progressing` while a Job runs and `Healthy` only when it completes, so `gpuready` deploys an Application containing exactly one Job. That Job waits until the scheduler actually advertises `minGPUs`, then writes the `gpu-stack-contract` ConfigMap in the `gpu-stack` namespace, last, so its existence is the signal.
 

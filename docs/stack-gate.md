@@ -6,18 +6,27 @@
 
 A Stack task is ready when its Argo CD Application reports both `Synced` and `Healthy`. For a Helm chart that installs an operator, `Healthy` means "Argo CD created the resources," which can be minutes to an hour before the thing the operator manages is actually usable. Anything that depends on an operator being *useful* rather than merely installed needs a stronger signal.
 
-The obvious fix is a custom Argo CD health check, and it does not fit inside a Stack. Argo CD reads custom health checks from exactly two places:
+The obvious answer is a custom Argo CD health check. It is worth understanding why that is the wrong tool rather than merely an unavailable one.
 
-- **`argocd-cm`.** The `resource.customizations.health.<group>_<kind>` key is instance-wide configuration in the Argo CD namespace, not per-Application. Argo CD also typically runs outside the tenant cluster while the Stack's destination is the tenant cluster. A StackInstance has a single destination, so the patch cannot be part of the same Stack. It would also fight whatever release owns `argocd-cm` and change health for every Application on that instance.
-- **Built into Argo CD.** Health checks contributed upstream under `resource_customizations/<group>/<kind>/health.lua` ship with Argo CD itself.
+**A health check is a pure function of one resource the Application manages.** A `health.lua` receives a single `obj` and returns a status. That shape rules out most of what a Stack actually needs to wait for:
 
-So derive the health from a kind Argo CD already understands. **Argo CD's built-in Job health reports `Progressing` while a Job runs and `Healthy` only when it completes.** A task that deploys an Application containing exactly one Job is therefore a real readiness gate, with no Argo CD configuration and no cluster-wide side effects.
+| The gate can | A health check cannot |
+| --- | --- |
+| Sum allocatable `nvidia.com/gpu` across every node matching a selector | See more than one object. It cannot list nodes |
+| Wait on resources the Application does not manage, such as Nodes | Run at all against a resource outside the Application |
+| Wait on a contract another Stack published | Reach across Applications. Health is per-Application |
+| Write the contract, making the wait and the handoff one task | Write anything. It is a predicate |
+| Verify by doing, up to running a CUDA kernel | Do anything other than read status |
+| Wait for a resource to exist, including an unserved CRD | Evaluate an object that does not exist yet |
+| Carry different conditions per instance, three in this repository | Vary per Application. `argocd-cm` is one definition per kind, instance-wide |
 
-Three things fall out of that:
+The aggregation row is the important one. Allocatable capacity is the signal that decides whether a GPU pod can be scheduled, and it is a fact about the node set, not about any single object an operator owns.
 
-- The wait becomes its own node in the task graph, visible in the UI with its own timeout, rather than a health status buried inside another Application.
-- The Job can verify anything `kubectl` can express, not just what a health check author anticipated.
-- The Job can publish what it learned, so the wait and the handoff are one task instead of two.
+**Packaging makes it worse, but it is the secondary problem.** Argo CD reads custom health checks from exactly two places, and neither travels inside a Stack: the `resource.customizations.health.<group>_<kind>` key in `argocd-cm`, which is instance-wide configuration in the Argo CD namespace and typically in a different cluster from the Stack's destination; and checks contributed upstream under `resource_customizations/<group>/<kind>/health.lua`, which ship with Argo CD itself.
+
+So derive the signal from a kind Argo CD already understands. **Argo CD's built-in Job health reports `Progressing` while a Job runs and `Healthy` only when it completes.** A task that deploys an Application containing exactly one Job is a readiness gate that can assert anything a container can, with no Argo CD configuration and no cluster-wide side effects. The wait also becomes its own node in the task graph, visible with its own timeout, rather than a status buried inside another Application.
+
+**What a health check does better.** It re-evaluates continuously. If the watched resource degrades an hour later, a health check flips the Application to `Degraded`; this Job is one-shot and never looks again. It also costs nothing at runtime: no pod, no image, no RBAC. The two are complementary. Use a health check for "is this object still healthy," and a gate for "is this condition, possibly spanning many objects, true right now, and what did we learn from it."
 
 ## What the gate does
 
@@ -209,4 +218,4 @@ Two rules worth knowing: a task declaring outputs is not ready until every outpu
 
 **Layered timeouts.** The Stack task timeout should exceed the Job's `activeDeadlineSeconds`, which should exceed `existsTimeoutSeconds` plus `waitTimeout` plus the capacity timeout. The task timeout firing first is the intended reporting path, since it surfaces in the Stack rather than only in the Job.
 
-**It is one-shot.** A Lua health check would flip the Application to `Degraded` if the watched resource later went unready; the Job never re-evaluates. For install ordering that does not matter, and ongoing health is a monitoring concern. The long-term fix for the GPU case is to upstream a `resource_customizations/nvidia.com/ClusterPolicy/health.lua` to Argo CD, which would make it built in everywhere with no configuration and turn this Job into an option rather than a requirement.
+**It is one-shot**, as covered under [Why it exists](#why-it-exists). For install ordering that does not matter, and ongoing health is a monitoring concern. For the `ClusterPolicy` case specifically there is a long-term answer: upstream a `resource_customizations/nvidia.com/ClusterPolicy/health.lua` to Argo CD, which would make that one check built in everywhere with no configuration. It would not replace the capacity check or the contract, which no health check can do.
