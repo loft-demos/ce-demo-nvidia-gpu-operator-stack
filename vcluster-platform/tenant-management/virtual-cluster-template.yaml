@@ -101,6 +101,12 @@ spec:
                       operator: In
                       values:
                         - xlarge-gpu
+                # Inherit OS image, SSH keys, and network configuration from the provider.
+                # large (4 cpu / 8Gi), not small (2 cpu / 4Gi): this pool carries cert-manager's
+                # three pods, the GPU Operator controller, NFD master and gc, both gate Jobs and
+                # the system pods. On small the 5 minute load average hit 4.10 on 2 cores during
+                # image extraction, which starved the operator of CPU until it lost its leader
+                # election lease and restarted three times.
                 - name: cpu
                   profile: cpu-services
                   quantity: 1
@@ -108,8 +114,7 @@ spec:
                     - property: vcluster.com/profile
                       operator: In
                       values:
-              # Inherit OS image, SSH keys, and network configuration from the provider.
-                        - small-cpu
+                        - large
 
         controlPlane:
           backingStore:

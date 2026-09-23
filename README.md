@@ -6,7 +6,7 @@ vCluster Platform hands you a complete NVIDIA GPU cluster, not an empty one. A s
 
 The `demo-gpu` Stack runs cert-manager and the NVIDIA GPU Operator in parallel, then a readiness gate that holds until the scheduler actually advertises a GPU, then NVSentinel and a CUDA smoke test side by side. Eight parameters flow from the tenant cluster template through the Stack and into each application's Helm values, so one form in the Platform UI configures GPU driver mode, chart versions, the Argo CD project, node placement, and whether cert-manager gets installed at all.
 
-Two NodeProfiles split the workers: `cpu-services` labels its nodes `workload.example.com/pool=cpu-services` and stays untainted, so it carries cert-manager and the service controllers, while `gpu-compute` labels its nodes `workload.example.com/pool=gpu-compute` and carries a permanent `nvidia.com/gpu=true:NoSchedule` taint that reserves GPU workers for NVIDIA node agents and GPU workloads with a matching toleration. Both pools are provisioned from `privateNodes.autoNodes`, each picked by a `nodeTypeSelector` on `vcluster.com/profile` (`xlarge-gpu` for GPU, `small` for CPU), and every placement decision in the stack keys off the pool label plus that taint.
+Two NodeProfiles split the workers: `cpu-services` labels its nodes `workload.example.com/pool=cpu-services` and stays untainted, so it carries cert-manager and the service controllers, while `gpu-compute` labels its nodes `workload.example.com/pool=gpu-compute` and carries a permanent `nvidia.com/gpu=true:NoSchedule` taint that reserves GPU workers for NVIDIA node agents and GPU workloads with a matching toleration. Both pools are provisioned from `privateNodes.autoNodes`, each picked by a `nodeTypeSelector` on `vcluster.com/profile` (`xlarge-gpu` for GPU, `large` for CPU), and every placement decision in the stack keys off the pool label plus that taint.
 
 This repository contains the Platform templates and profiles. It uses existing Platform, Argo CD, and node-provider infrastructure; it does not install those prerequisites.
 
@@ -159,7 +159,9 @@ Before applying the manifests, edit [virtual-cluster-template.yaml](vcluster-pla
 | Pool | Provider | `nodeTypeSelector` | `profile` | Node label | Taint |
 | --- | --- | --- | --- | --- | --- |
 | GPU | `metal3-us-va-blacksburg-dc1` | `vcluster.com/profile In [xlarge-gpu]` | `gpu-compute` | `workload.example.com/pool=gpu-compute` | `nvidia.com/gpu=true:NoSchedule` |
-| CPU | `kubevirt-us-va-blacksburg-dc1` | `vcluster.com/profile In [small]` | `cpu-services` | `workload.example.com/pool=cpu-services` | none |
+| CPU | `metal3-us-va-blacksburg-dc1` | `vcluster.com/profile In [large]` | `cpu-services` | `workload.example.com/pool=cpu-services` | none |
+
+**Size the CPU pool for what the Stack puts on it**, which is more than it looks: cert-manager's three pods, the GPU Operator controller, NFD master and garbage collector, both gate Jobs, and the usual system pods. On a 2 cpu / 4Gi node that came to 15 pods, the 5 minute load average reached 4.10 during image extraction, and the GPU Operator controller lost its leader election lease to a 5 second API timeout and restarted three times before the node settled. `large` is 4 cpu / 8Gi and has the headroom.
 
 The `vcluster.com/profile` property inside `nodeTypeSelector` names a node type published by the node provider. Despite the name, it is unrelated to the NodeProfile named in `profile`.
 
@@ -460,6 +462,21 @@ Delete the sample Job before repeating step 5. Keep the tenant cluster for furth
 
 ## Validation scope
 
-Both charts render cleanly with `helm lint` and `helm template`, the gate in all three modes, and the conditionals were verified to resolve: `templateRef.name` to `demo-cert-manager` and `demo-cert-manager-check`, and `waitEnabled` to `true` and `false`. The gate script was exercised against a stub `kubectl` for the wait-enabled, wait-disabled, and nothing-to-do paths. The gate image has not been built by CI yet, and neither Job has run against a live cluster. The templates have been locally rendered for both driver modes, including checks of CPU/GPU placement and template references. NVSentinel validation used the `v1.13.0` GitHub source chart because the OCI download returned HTTP 403. GPU Operator creates its operand DaemonSets at runtime, so Helm rendering alone does not validate their live behavior. The manifests and demo workload still need an end-to-end run in your environment.
+**Run end to end on bare metal, 2026-09-23.** Both gates passed, the CUDA sample reported `Test PASSED`, and NVSentinel started behind `dcgmready`:
+
+| Event | Time |
+| --- | --- |
+| StackInstance created | 19:34:40 |
+| CPU node joined | 19:37:57 |
+| GPU node joined | 19:39:10 |
+| `gpuready` passed | 19:44:50 |
+| `dcgmready` passed | 19:45:44 |
+| `gpu-smoke-test` complete | `Test PASSED` |
+
+5m40s from GPU node join to the gate passing, against 9m21s on an earlier run of the same Stack. The difference is the two changes that preceded it: the gate no longer waits on `ClusterPolicy`, and the driver is baked into the node image, so there is no 651 MB `nvcr.io/nvidia/driver` pull and no in-cluster driver build. `driver-validation` accepted the preinstalled driver, and the node reported `nvidia.com/cuda.driver-version.full=580.178.04`, the version from the OS image rather than the operator's container.
+
+Pool-scoped OS images were confirmed on the same run: the GPU node booted kernel 6.8.0-142 from `ubuntu-noble-nvidia-gpu` while the CPU node stayed on 6.8.0-101, with both pools under one `autoNodes` provider entry.
+
+What is still unverified: the gate image has only been pulled from GHCR at the `edge` tag, the chart has not been published as an OCI artifact, and `waitForClusterPolicy=true` and `certManagerPreinstalled=true` have not been exercised against a live cluster. Both charts render cleanly with `helm lint` and `helm template`, the gate in all three modes, and the conditionals were verified to resolve: `templateRef.name` to `demo-cert-manager` and `demo-cert-manager-check`, and `waitEnabled` to `true` and `false`. The gate script was exercised against a stub `kubectl` for the wait-enabled, wait-disabled, and nothing-to-do paths. NVSentinel validation used the `v1.13.0` GitHub source chart because the OCI download returned HTTP 403.
 
 Additional reference: [vCluster Private Nodes configuration](https://www.vcluster.com/docs/vcluster/configure/vcluster-yaml/private-nodes/).
