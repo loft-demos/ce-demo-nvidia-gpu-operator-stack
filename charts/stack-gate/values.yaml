@@ -1,6 +1,6 @@
 # The gate image built by .github/workflows/publish-image.yaml.
 image:
-  repository: ghcr.io/loft-demos/ce-demo-nvidia-gpu-operator-stack/stack-gate
+  repository: ghcr.io/loft-demos/stack-gate
   tag: edge
   pullPolicy: IfNotPresent
 

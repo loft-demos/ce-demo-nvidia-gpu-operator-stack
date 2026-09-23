@@ -49,6 +49,7 @@ Not Platform objects. These are what Argo CD and the container build consume, an
 | [Dockerfile](Dockerfile) | Builds the gate image: upstream `kubectl` on Alpine, running as UID 65532 |
 | [.github/workflows/publish-image.yaml](.github/workflows/publish-image.yaml) | Builds and pushes that image to GHCR, multi-architecture |
 | [.github/workflows/publish-chart.yaml](.github/workflows/publish-chart.yaml) | Packages both charts and pushes them to GHCR as OCI artifacts, on release |
+| [docs/stack-gate.md](docs/stack-gate.md) | The reusable gate: how it works, every parameter, and how to point it at something else |
 
 All commands below run from the root of your clone of this repository. No parent repository or sibling directory is needed.
 
@@ -66,10 +67,13 @@ Tasks form a directed acyclic graph. Tasks with no dependencies run concurrently
 | `cert-manager` | none | `15m0s` | `demo-cert-manager`, or `demo-cert-manager-check` when cert-manager is already installed |
 | `gpu-operator` | none | `45m0s` | `demo-gpu-operator` application template |
 | `gpuready` | `gpu-operator` | `45m0s` | `demo-stack-gate`: the Job that holds until GPUs are real |
+| `dcgmready` | `gpu-operator` | `15m0s` | `demo-stack-gate` again: waits for the DCGM host engine |
 | `gpu-smoke-test` | `gpuready` | `15m0s` | `demo-gpu-smoke-test`: a CUDA sample on the GPU pool |
-| `nvsentinel` | `gpuready`, `cert-manager` | `20m0s` | `demo-nvsentinel` application template |
+| `nvsentinel` | `gpuready`, `dcgmready`, `cert-manager` | `20m0s` | `demo-nvsentinel` application template |
 
-`gpu-smoke-test` and `nvsentinel` both depend only on the gate, so they run in parallel. The graph is two independent roots converging on the gate, then fanning back out.
+Two gates run in parallel off `gpu-operator`, because the two downstream tasks need different things. `gpu-smoke-test` needs a schedulable GPU, so it waits on `gpuready` alone and starts as soon as the scheduler advertises one. `nvsentinel` needs a schedulable GPU **and** a DCGM host engine it can dial, so it waits on both gates plus cert-manager.
+
+`dcgmready` exists because the GPU Operator creates `dcgm-exporter` and `nvidia-dcgm` at the same instant with nothing ordering them, so on a cold start NVSentinel can begin against a DCGM that is not serving and report `GpuDcgmConnectivityFailure`. It is the same `demo-stack-gate` template with different parameters, publishing no contract and checking no capacity. See [docs/stack-gate.md](docs/stack-gate.md).
 
 Write those timeouts in full Go duration form, seconds included. `timeout` and `defaults.taskTimeout` are `metav1.Duration` fields, so the API server stores them canonically: apply `45m` and read back `45m0s`. If the StackTemplate is itself managed by Argo CD, that one-character difference is permanent drift and the Application never reaches Synced. Argo CD's own `retry.backoff` durations in the application templates are plain strings and are left as written.
 
@@ -83,62 +87,24 @@ Each task here is an `argoCDApplication`, so Argo CD owns reconciliation and dri
 
 ## The gpuready gate
 
-The GPU Operator Application goes `Healthy` as soon as Argo CD has created its resources. That is minutes to an hour before a driver is built, the device plugin has registered, and the scheduler will admit a pod asking for `nvidia.com/gpu`. Anything that depends on GPU Operator being *useful*, rather than merely installed, needs a stronger signal than Argo CD's default health for the chart.
+The GPU Operator Application goes `Healthy` as soon as Argo CD has created its resources. That is minutes to an hour before a driver is built, the device plugin has registered, and the scheduler will admit a pod asking for `nvidia.com/gpu`. Anything depending on GPU Operator being *useful* rather than merely installed needs a stronger signal, and a custom Argo CD health check cannot travel inside a Stack.
 
-The obvious fix is a custom Argo CD health check for `ClusterPolicy`, and it does not fit. Argo CD reads custom health checks from exactly two places, and neither can travel inside a Stack:
-
-- **`argocd-cm`.** The `resource.customizations.health.<group>_<kind>` key is instance-wide configuration in the Argo CD namespace, not per-Application. Argo CD also typically runs outside the tenant cluster, while this Stack's destination is the tenant cluster. A StackInstance can target the control plane cluster, but it has a single destination, so the patch could not be part of this Stack. It would also fight whatever release owns `argocd-cm`, and it would change health for every Application on that Argo CD instance.
-- **Built into Argo CD.** Health checks contributed upstream under `resource_customizations/<group>/<kind>/health.lua` ship with Argo CD itself.
-
-So derive the health from a kind Argo CD already understands. Argo CD's built-in Job health reports `Progressing` while a Job runs and `Healthy` only when it completes, so the `gpuready` task deploys an Application containing exactly one Job. [gate/stack-gate.sh](gate/stack-gate.sh) runs in it and, in order:
-
-1. Polls until `clusterpolicy/cluster-policy` exists, which also covers the window where the CRD is not served yet.
-2. Runs `kubectl wait clusterpolicy/cluster-policy --for=jsonpath='{.status.state}'=ready`.
-3. Sums allocatable `nvidia.com/gpu` across nodes labeled `workload.example.com/pool=gpu-compute` and waits until it reaches `minGPUs`. A ready `ClusterPolicy` does not by itself mean the device plugin registered anything.
-4. Writes the `gpu-stack-contract` ConfigMap in the `gpu-stack` namespace, last, so its existence is the signal.
+So the Stack derives the signal from a kind Argo CD already understands. Argo CD's built-in Job health reports `Progressing` while a Job runs and `Healthy` only when it completes, so `gpuready` deploys an Application containing exactly one Job. That Job waits until the scheduler actually advertises `minGPUs`, then writes the `gpu-stack-contract` ConfigMap in the `gpu-stack` namespace, last, so its existence is the signal.
 
 ![The demo-gpu Stack mid-run in vCluster Platform: cert-manager and gpu-operator both healthy, gpuready still progressing, gpu-smoke-test and nvsentinel still pending](docs/imgs/gpu-stack-ready-gate-progressing.png)
 
 *The gate doing its job. GPU Operator has reported healthy, so a Stack without this task would already be installing NVSentinel against a cluster with no schedulable GPU. Instead `gpuready` holds, and both downstream tasks wait with it.*
 
-This buys several things at once:
-
-- The correct health gate, with zero Argo CD configuration and no cluster-wide side effects.
-- The wait is its own node in the graph, so the "waiting for drivers" phase is visible in the UI with its own timeout. That is a better demo beat than a health status buried inside one Application.
-- The contract replaces a separate publishing task, because the Job writes the ConfigMap itself.
-- The same template serves any gate. `demo-stack-gate` parameterizes what to wait on, what capacity to require, and what contract to write, so a second Stack can reuse it, including to wait on a contract this one published.
-
-`gpuready` then declares Stack **outputs** read from that ConfigMap, and `nvsentinel` consumes them:
-
-```yaml
-outputs:
-  - name: dcgmhost
-    fromResource:
-      apiVersion: v1
-      kind: ConfigMap
-      namespace: gpu-stack
-      name: gpu-stack-contract
-      jsonPath: '{.data.dcgmHost}'
-```
+`gpuready` declares Stack outputs read from that contract, and `nvsentinel` consumes them, so the DCGM address is passed rather than hard-coded:
 
 ```yaml
 parameters:
   dcgmHost: '{{ .Outputs.gpuready.dcgmhost }}'
 ```
 
-The task is named `gpuready` rather than `gpu-ready` on purpose: outputs are referenced as `{{ .Outputs.task.name }}`, and the template syntax cannot address a name containing a hyphen. Platform rejects a hyphenated task name that declares outputs.
+By default the gate does not wait on `ClusterPolicy`. `ClusterPolicy` aggregates every GPU Operator operand, so it stays `notReady` while `dcgm-exporter` loses a startup race that nothing downstream cares about, which cost about 90 seconds in a measured run. Set `waitForClusterPolicy` to hold for the whole operand set instead.
 
-**The tradeoff.** The Job is one-shot. A Lua health check would flip the Application to `Degraded` if `ClusterPolicy` later went `notReady`; the Job never re-evaluates. For install ordering that does not matter, and ongoing GPU health is NVSentinel's job. The long-term fix is to upstream a `resource_customizations/nvidia.com/ClusterPolicy/health.lua` to Argo CD, which would make it built in everywhere with no configuration.
-
-**If your Argo CD already has that health check**, set `clusterPolicyHealthCheck` at cluster creation. The `gpu-operator` task then already holds `Progressing` until the policy reports ready, so the gate skips steps 1 and 2 and waiting a second time would add nothing:
-
-| | `clusterPolicyHealthCheck=false` (default) | `clusterPolicyHealthCheck=true` |
-| --- | --- | --- |
-| Wait for `ClusterPolicy` ready | gate does it | Argo CD does it, on the `gpu-operator` task |
-| Wait for allocatable GPUs | gate does it | gate does it |
-| Publish `gpu-stack-contract` | gate does it | gate does it |
-
-Step 3 stays in both cases, deliberately. A `ClusterPolicy` health check reports on the policy, not on whether the device plugin registered anything with the scheduler, so it is not a substitute for counting allocatable `nvidia.com/gpu`. The task also still publishes the contract, which is what the outputs and both downstream tasks depend on. To turn the gate into a pure publish step, set `minGPUs` to `0` as well: it then records the count it observes without blocking on it.
+**The gate is reusable, and this Stack uses it three times.** How to point it at something else, the full parameter reference, and worked examples beyond this demo are in [docs/stack-gate.md](docs/stack-gate.md).
 
 ## The GPU smoke test
 
@@ -250,7 +216,7 @@ These profiles omit `startupTaints`: those disappear at Kubernetes Node Ready, w
 
 Both gate templates run one image: upstream `kubectl` copied onto Alpine, with [gate/stack-gate.sh](gate/stack-gate.sh) as the entrypoint, running as UID 65532. The upstream `kubectl` image is distroless and has no shell, which is the only reason this image exists at all.
 
-[.github/workflows/publish-image.yaml](.github/workflows/publish-image.yaml) builds and pushes it to `ghcr.io/<owner>/ce-demo-nvidia-gpu-operator-stack/stack-gate` for `linux/amd64` and `linux/arm64`, with provenance and an SBOM. It runs on pushes to `main` that touch the `Dockerfile`, `gate/`, or the workflow itself, on published releases, and on manual dispatch. Tags follow the release type:
+[.github/workflows/publish-image.yaml](.github/workflows/publish-image.yaml) builds and pushes it to `ghcr.io/<owner>/stack-gate` for `linux/amd64` and `linux/arm64`, with provenance and an SBOM. It runs on pushes to `main` that touch the `Dockerfile`, `gate/`, or the workflow itself, on published releases, and on manual dispatch. Tags follow the release type:
 
 | Trigger | Tags |
 | --- | --- |
@@ -302,7 +268,7 @@ Create a tenant cluster from **Demo - Static GPU Nodes** in the Platform UI. Set
 | `argoProject` | Your Argo CD project; defaults to `default` |
 | `cpuNodePool` | CPU pool label value passed through the stack to every application template; defaults to `cpu-services` |
 | `certManagerPreinstalled` | `false` installs cert-manager; `true` verifies the installation already in the cluster and installs nothing |
-| `clusterPolicyHealthCheck` | `true` when this Argo CD instance has a custom Lua health check for `nvidia.com` `ClusterPolicy`. The gate then skips its own ClusterPolicy wait and still verifies GPU capacity |
+| `waitForClusterPolicy` | `false` by default: the gate verifies allocatable GPU capacity only. `true` also waits for `ClusterPolicy` to report ready, which means waiting on every GPU Operator operand |
 | `driverPreinstalled` | `false` to let GPU Operator install the driver; `true` if the node image already has it |
 | `minGPUs` | GPUs the scheduler must advertise before the `gpuready` gate passes; defaults to `1` |
 | `gpuOperatorVersion` | Defaults to `v26.3.3` |
@@ -323,7 +289,7 @@ kubectl --context "$TENANT_CONTEXT" get nodes
 
 ### 1. Show the Stack, then the node profiles
 
-Open the `demo-gpu` StackTemplate in Platform and walk the five tasks. cert-manager and GPU Operator have no dependencies and start together; `gpuready` waits on GPU Operator and then holds until the scheduler advertises a GPU; `gpu-smoke-test` and NVSentinel both wait on `gpuready` and then run in parallel. Each task references an application template instead of carrying its own copy of the Helm values, and the five Stack parameters are the only knobs anyone turns. This is the whole point: the cluster and its GPU software stack are one declarative unit with one lifecycle.
+Open the `demo-gpu` StackTemplate in Platform and walk the six tasks. cert-manager and GPU Operator have no dependencies and start together. Two gates then run in parallel off GPU Operator: `gpuready` holds until the scheduler advertises a GPU, `dcgmready` holds until the DCGM host engine is serving. `gpu-smoke-test` needs only the first and starts as soon as it passes; NVSentinel needs both, plus cert-manager. Each task references an application template instead of carrying its own copy of the Helm values, and the five Stack parameters are the only knobs anyone turns. This is the whole point: the cluster and its GPU software stack are one declarative unit with one lifecycle.
 
 Then open `cpu-services` and `gpu-compute`. Show that both set `workload.example.com/pool` to identify the pool, that `cpu-services` adds no taints, and that the `nvidia.com/gpu=true:NoSchedule` taint on `gpu-compute` reserves GPU nodes for pods with a matching toleration.
 
@@ -484,6 +450,7 @@ Delete the sample Job before repeating step 5. Keep the tenant cluster for furth
 - **Stack waiting or failing:** read the `StackInstance` task phases with the jsonpath command in step 3. A task stuck in `Pending` is waiting on its `dependsOn` list; a `Degraded` task names its reason in `message`. Then check the tenant cluster's `StacksSynced` condition and the corresponding Argo CD applications. Task timeouts are in the table under [How the Stack works](#how-the-stack-works).
 - **`gpuready` stuck Progressing:** read the gate log, `kubectl -n gpu-stack logs -l app.kubernetes.io/instance=gpu-ready --tail=-1`. It names which step it is on. A long wait at step 2 is a driver still building; a long wait at step 3 means `ClusterPolicy` is ready but no GPU is allocatable yet, so check the device plugin pods and `kubectl get nodes -o json | jq '.items[].status.allocatable'`.
 - **Gate Job in `ImagePullBackOff`:** the GHCR package is still private, or the tag does not exist. See [Build the gate image](#build-the-gate-image).
+- **NVSentinel reporting `GpuDcgmConnectivityFailure`:** it started before the DCGM host engine was serving. That is what `dcgmready` exists to prevent, so check that task ran and passed rather than restarting NVSentinel.
 - **`gpu-smoke-test` Pending:** the gate passed, so a GPU was allocatable, but something else now holds it. Check for another pod with an `nvidia.com/gpu` limit, including a leftover `cuda-vectoradd` Job from step 5.
 - **`gpu-smoke-test` failing:** read its log. A pull failure points at `nvcr.io` access from the worker; a CUDA error points at the driver or toolkit rather than at scheduling, which the gate already proved.
 - **`gpuready` healthy but `nvsentinel` still waiting:** a task declaring outputs is not ready until every output is captured, reported as `CapturingOutputs`. Confirm `gpu-stack-contract` exists and that each `jsonPath` in the task selects a value.
