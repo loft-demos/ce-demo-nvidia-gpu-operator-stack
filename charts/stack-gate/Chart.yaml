@@ -1,0 +1,6 @@
+apiVersion: v2
+name: stack-gate
+description: A readiness gate for a Stack task. Runs a Job that waits for a resource to report ready and for capacity to be advertised, then publishes a contract ConfigMap.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

@@ -27,6 +27,24 @@ spec:
       label: NVIDIA Driver Preinstalled
       type: boolean
       defaultValue: "false"
+    - variable: certManagerPreinstalled
+      label: cert-manager Already Installed
+      description: Enable when the tenant cluster already runs cert-manager. The Stack then verifies that
+        installation instead of installing its own.
+      type: boolean
+      defaultValue: "false"
+    - variable: clusterPolicyHealthCheck
+      label: Argo CD Has A ClusterPolicy Health Check
+      description: Enable when this Argo CD instance defines a custom Lua health check for nvidia.com
+        ClusterPolicy. The gpuready gate then skips its own ClusterPolicy wait.
+      type: boolean
+      defaultValue: "false"
+    - variable: minGPUs
+      label: Minimum Allocatable GPUs
+      description: How many GPUs the scheduler must advertise before the gpuready gate passes.
+      type: number
+      required: true
+      defaultValue: "1"
     - variable: gpuOperatorVersion
       label: GPU Operator Version
       type: string
@@ -97,5 +115,8 @@ spec:
                 cpuNodePool: {{ .Values.cpuNodePool | quote }}
                 argoProject: {{ .Values.argoProject | quote }}
                 driverPreinstalled: {{ .Values.driverPreinstalled | toString | quote }}
+                certManagerPreinstalled: {{ .Values.certManagerPreinstalled | toString | quote }}
+                minGPUs: {{ .Values.minGPUs | toString | quote }}
+                clusterPolicyHealthCheck: {{ .Values.clusterPolicyHealthCheck | toString | quote }}
                 gpuOperatorVersion: {{ .Values.gpuOperatorVersion | quote }}
                 nvsentinelVersion: {{ .Values.nvsentinelVersion | quote }}

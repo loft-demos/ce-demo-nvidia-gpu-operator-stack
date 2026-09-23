@@ -1,0 +1,33 @@
+# Argo CD's built-in Job health again: Progressing while the sample runs, Healthy
+# when it exits 0. The Stack task is therefore green only if a CUDA workload really
+# ran on a GPU worker, which is a stronger claim than "a GPU was advertised".
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "gpu-smoke-test.fullname" . }}-{{ include "gpu-smoke-test.configHash" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gpu-smoke-test.labels" . | nindent 4 }}
+spec:
+  backoffLimit: {{ .Values.job.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.job.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "gpu-smoke-test.selectorLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        {{ .Values.gpu.poolLabelKey }}: {{ .Values.gpu.pool | quote }}
+      tolerations:
+        - key: {{ .Values.toleration.key | quote }}
+          operator: Equal
+          value: {{ .Values.toleration.value | quote }}
+          effect: {{ .Values.toleration.effect }}
+      containers:
+        - name: cuda-vectoradd
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          resources:
+            limits:
+              {{ .Values.gpu.resource }}: {{ .Values.gpu.count }}

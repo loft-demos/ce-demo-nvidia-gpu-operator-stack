@@ -1,0 +1,26 @@
+# NVIDIA's CUDA VectorAdd sample. It expects a full GPU exposed as nvidia.com/gpu
+# and prints "Test PASSED" on success.
+image:
+  repository: nvcr.io/nvidia/k8s/cuda-sample
+  tag: vectoradd-cuda12.5.0-ubuntu22.04
+  pullPolicy: IfNotPresent
+
+gpu:
+  # Pool label value the Job targets. Supplied by the gate's contract inside the Stack.
+  pool: gpu-compute
+  poolLabelKey: workload.example.com/pool
+  resource: nvidia.com/gpu
+  count: 1
+
+# Matches the taint the gpu-compute NodeProfile applies.
+toleration:
+  key: nvidia.com/gpu
+  value: "true"
+  effect: NoSchedule
+
+job:
+  backoffLimit: 2
+  activeDeadlineSeconds: 900
+
+nameOverride: ""
+fullnameOverride: ""

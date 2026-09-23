@@ -1,0 +1,67 @@
+{{- if .Values.serviceAccount.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "stack-gate.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stack-gate.labels" . | nindent 4 }}
+{{- end }}
+{{- if .Values.rbac.create }}
+---
+# Cluster-scoped reads: the watched resource, and node allocatable for the capacity check.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "stack-gate.fullname" . }}-{{ .Release.Namespace }}
+  labels:
+    {{- include "stack-gate.labels" . | nindent 4 }}
+rules:
+  {{- toYaml .Values.rbac.clusterRules | nindent 2 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "stack-gate.fullname" . }}-{{ .Release.Namespace }}
+  labels:
+    {{- include "stack-gate.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "stack-gate.fullname" . }}-{{ .Release.Namespace }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "stack-gate.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- if .Values.contract.name }}
+---
+# Namespaced write: the contract ConfigMap only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "stack-gate.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stack-gate.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "stack-gate.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stack-gate.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "stack-gate.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "stack-gate.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: gpu-smoke-test
+description: A Job that runs a CUDA sample on the GPU pool, so the Stack proves the GPU computes rather than only that it was advertised.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

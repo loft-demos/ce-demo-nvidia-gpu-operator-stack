@@ -1,0 +1,68 @@
+# The gate image built by .github/workflows/publish-image.yaml.
+image:
+  repository: ghcr.io/loft-demos/ce-demo-nvidia-gpu-operator-stack/stack-gate
+  tag: edge
+  pullPolicy: IfNotPresent
+
+# The resource the gate waits on, as TYPE/NAME.
+wait:
+  resource: clusterpolicy/cluster-policy
+  # Empty for a cluster-scoped resource.
+  namespace: ""
+  # Passed to kubectl wait --for. Empty waits only for the resource to exist.
+  condition: jsonpath={.status.state}=ready
+  timeout: 30m
+  # Bound on the "does it exist yet" poll, which also covers a CRD that is not served yet.
+  existsTimeoutSeconds: 900
+
+# A ready ClusterPolicy does not mean the device plugin has registered any GPUs,
+# so the gate also waits for the scheduler to advertise capacity.
+# Set min to 0 to skip this check.
+capacity:
+  resource: nvidia.com/gpu
+  min: 1
+  nodeSelector: workload.example.com/pool=gpu-compute
+  timeoutSeconds: 600
+
+pollIntervalSeconds: 10
+
+# Written only after every check passes, so its existence is the signal.
+# Set name to "" to run a gate that publishes nothing.
+contract:
+  name: gpu-stack-contract
+  # Extra keys written into the ConfigMap alongside ready, observedCount,
+  # resourceName, and verifiedAt.
+  data:
+    gpuPool: gpu-compute
+    dcgmHost: nvidia-dcgm.gpu-operator.svc
+    dcgmPort: "5555"
+
+job:
+  backoffLimit: 4
+  activeDeadlineSeconds: 3300
+  nodeSelector: {}
+  tolerations: []
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
+
+rbac:
+  create: true
+  # Cluster-scoped reads the gate needs. Override when waiting on a different kind.
+  clusterRules:
+    - apiGroups: ["nvidia.com"]
+      resources: ["clusterpolicies"]
+      verbs: ["get", "list", "watch"]
+    - apiGroups: [""]
+      resources: ["nodes"]
+      verbs: ["get", "list", "watch"]
+
+serviceAccount:
+  create: true
+  name: ""
+
+nameOverride: ""
+fullnameOverride: ""

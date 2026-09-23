@@ -1,0 +1,77 @@
+# Argo CD's built-in Job health is the whole mechanism: Progressing while this Job
+# runs, Healthy when it completes. A Stack task deploying this Application is
+# therefore a readiness gate, with its own node in the graph and its own timeout.
+#
+# There is deliberately no ttlSecondsAfterFinished: a TTL-deleted Job would be
+# recreated by Argo CD self-heal, re-running the gate and flipping the Application
+# back to Progressing.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "stack-gate.fullname" . }}-{{ include "stack-gate.configHash" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stack-gate.labels" . | nindent 4 }}
+spec:
+  backoffLimit: {{ .Values.job.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.job.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "stack-gate.selectorLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "stack-gate.serviceAccountName" . }}
+      {{- with .Values.job.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.job.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gate
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: WAIT_RESOURCE
+              value: {{ .Values.wait.resource | quote }}
+            - name: WAIT_NAMESPACE
+              value: {{ .Values.wait.namespace | quote }}
+            - name: WAIT_CONDITION
+              value: {{ .Values.wait.condition | quote }}
+            - name: WAIT_TIMEOUT
+              value: {{ .Values.wait.timeout | quote }}
+            - name: EXISTS_TIMEOUT_SECONDS
+              value: {{ .Values.wait.existsTimeoutSeconds | quote }}
+            - name: CAPACITY_RESOURCE
+              value: {{ .Values.capacity.resource | quote }}
+            - name: CAPACITY_MIN
+              value: {{ .Values.capacity.min | quote }}
+            - name: CAPACITY_NODE_SELECTOR
+              value: {{ .Values.capacity.nodeSelector | quote }}
+            - name: CAPACITY_TIMEOUT_SECONDS
+              value: {{ .Values.capacity.timeoutSeconds | quote }}
+            - name: POLL_INTERVAL
+              value: {{ .Values.pollIntervalSeconds | quote }}
+            - name: CONTRACT_NAME
+              value: {{ .Values.contract.name | quote }}
+            - name: CONTRACT_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            - name: CONTRACT_DATA
+              value: {{ include "stack-gate.contractData" . | toJson }}
+          {{- with .Values.job.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
