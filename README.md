@@ -97,6 +97,10 @@ So derive the health from a kind Argo CD already understands. Argo CD's built-in
 3. Sums allocatable `nvidia.com/gpu` across nodes labeled `workload.example.com/pool=gpu-compute` and waits until it reaches `minGPUs`. A ready `ClusterPolicy` does not by itself mean the device plugin registered anything.
 4. Writes the `gpu-stack-contract` ConfigMap in the `gpu-stack` namespace, last, so its existence is the signal.
 
+![The demo-gpu Stack mid-run in vCluster Platform: cert-manager and gpu-operator both healthy, gpuready still progressing, gpu-smoke-test and nvsentinel still pending](docs/imgs/gpu-stack-ready-gate-progressing.png)
+
+*The gate doing its job. GPU Operator has reported healthy, so a Stack without this task would already be installing NVSentinel against a cluster with no schedulable GPU. Instead `gpuready` holds, and both downstream tasks wait with it.*
+
 This buys several things at once:
 
 - The correct health gate, with zero Argo CD configuration and no cluster-wide side effects.
@@ -361,7 +365,7 @@ kubectl --context "$PLATFORM_CONTEXT" get stackinstance "$STACK_NAME" -n "$STACK
 
 The aggregate phase moves through `Pending`, `Progressing`, and `Healthy`, and reports `Degraded` when a task fails or exceeds its timeout. Point out the shape of the run: `cert-manager` and `gpu-operator` progress at the same time, `nvsentinel` sits idle, and no one has touched the cluster since creating it. The Platform UI shows the same graph and the same phases.
 
-The beat to dwell on is `gpuready`. It goes `Progressing` the moment GPU Operator reports healthy and stays there, visibly, while the driver builds. Watch it work from inside the tenant cluster:
+The beat to dwell on is `gpuready`. It goes `Progressing` the moment GPU Operator reports healthy and stays there, visibly, while the driver builds, which is the state pictured under [The gpuready gate](#the-gpuready-gate). Watch it work from inside the tenant cluster:
 
 ```sh
 kubectl --context "$TENANT_CONTEXT" -n gpu-stack get jobs
