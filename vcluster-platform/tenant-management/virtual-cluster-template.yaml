@@ -136,7 +136,7 @@ spec:
               enabled: true
           stacks:
             - name: gpu
-              displayName: Demo - GPU Stack
+              displayName: Demo - NVIDIA GPU Stack
               templateRef:
                 name: demo-gpu
               parameters:
