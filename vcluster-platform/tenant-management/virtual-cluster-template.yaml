@@ -101,9 +101,6 @@ spec:
                       operator: In
                       values:
                         - xlarge-gpu
-              # Inherit OS image, SSH keys, and network configuration from the provider.
-            - provider: metal3-us-va-blacksburg-dc1
-              static:
                 - name: cpu
                   profile: cpu-services
                   quantity: 1
@@ -111,6 +108,7 @@ spec:
                     - property: vcluster.com/profile
                       operator: In
                       values:
+              # Inherit OS image, SSH keys, and network configuration from the provider.
                         - small-cpu
 
         controlPlane:
