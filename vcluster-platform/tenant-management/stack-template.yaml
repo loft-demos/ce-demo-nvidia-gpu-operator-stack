@@ -71,7 +71,7 @@ spec:
         output: dcgmport
   tasks:
     - name: cert-manager
-      timeout: 15m
+      timeout: 15m0s
       argoCDApplication:
         # A Stack task cannot be skipped: there is no when/if/enabled field, and control
         # flow is only legal inside a scalar. Switching templateRef.name is the sanctioned
@@ -84,7 +84,7 @@ spec:
           cpuNodePool: '{{ .Values.cpuNodePool }}'
           project: '{{ .Values.argoProject }}'
     - name: gpu-operator
-      timeout: 45m
+      timeout: 45m0s
       argoCDApplication:
         templateRef:
           name: demo-gpu-operator
@@ -105,7 +105,7 @@ spec:
     - name: gpuready
       dependsOn:
         - gpu-operator
-      timeout: 45m
+      timeout: 45m0s
       argoCDApplication:
         templateRef:
           name: demo-stack-gate
@@ -152,7 +152,7 @@ spec:
     - name: gpu-smoke-test
       dependsOn:
         - gpuready
-      timeout: 15m
+      timeout: 15m0s
       argoCDApplication:
         templateRef:
           name: demo-gpu-smoke-test
@@ -163,7 +163,7 @@ spec:
       dependsOn:
         - gpuready
         - cert-manager
-      timeout: 20m
+      timeout: 20m0s
       argoCDApplication:
         templateRef:
           name: demo-nvsentinel

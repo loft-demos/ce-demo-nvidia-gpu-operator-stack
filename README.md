@@ -63,13 +63,15 @@ Tasks form a directed acyclic graph. Tasks with no dependencies run concurrently
 
 | Task | `dependsOn` | Timeout | Deploys |
 | --- | --- | --- | --- |
-| `cert-manager` | none | 15m | `demo-cert-manager`, or `demo-cert-manager-check` when cert-manager is already installed |
-| `gpu-operator` | none | 45m | `demo-gpu-operator` application template |
-| `gpuready` | `gpu-operator` | 45m | `demo-stack-gate`: the Job that holds until GPUs are real |
-| `gpu-smoke-test` | `gpuready` | 15m | `demo-gpu-smoke-test`: a CUDA sample on the GPU pool |
-| `nvsentinel` | `gpuready`, `cert-manager` | 20m | `demo-nvsentinel` application template |
+| `cert-manager` | none | `15m0s` | `demo-cert-manager`, or `demo-cert-manager-check` when cert-manager is already installed |
+| `gpu-operator` | none | `45m0s` | `demo-gpu-operator` application template |
+| `gpuready` | `gpu-operator` | `45m0s` | `demo-stack-gate`: the Job that holds until GPUs are real |
+| `gpu-smoke-test` | `gpuready` | `15m0s` | `demo-gpu-smoke-test`: a CUDA sample on the GPU pool |
+| `nvsentinel` | `gpuready`, `cert-manager` | `20m0s` | `demo-nvsentinel` application template |
 
 `gpu-smoke-test` and `nvsentinel` both depend only on the gate, so they run in parallel. The graph is two independent roots converging on the gate, then fanning back out.
+
+Write those timeouts in full Go duration form, seconds included. `timeout` and `defaults.taskTimeout` are `metav1.Duration` fields, so the API server stores them canonically: apply `45m` and read back `45m0s`. If the StackTemplate is itself managed by Argo CD, that one-character difference is permanent drift and the Application never reaches Synced. Argo CD's own `retry.backoff` durations in the application templates are plain strings and are left as written.
 
 The ordering is load-bearing here. NVSentinel scrapes DCGM on a service that does not exist until GPU Operator is healthy, and on a fresh node image GPU Operator has a driver to build and validate first. `dependsOn` and the generous timeouts encode that wait once, in the template, instead of in a runbook or a retry loop.
 
@@ -475,7 +477,7 @@ Delete the sample Job before repeating step 5. Keep the tenant cluster for furth
 - **cert-manager or operator controller Pending:** confirm a CPU worker has the `cpu-services` pool label. These pods intentionally cannot use the GPU pool.
 - **GPU agents missing:** confirm NVIDIA hardware discovery labels and matching tolerations. Inspect the GPU Operator pod events and logs.
 - **CUDA Job Pending:** inspect its pod events. Check GPU capacity, the pool label, and whether another workload already occupies the GPU.
-- **Stack waiting or failing:** read the `StackInstance` task phases with the jsonpath command in step 3. A task stuck in `Pending` is waiting on its `dependsOn` list; a `Degraded` task names its reason in `message`. Then check the tenant cluster's `StacksSynced` condition and the corresponding Argo CD applications. Task timeouts are 10 minutes for cert-manager, 45 minutes for GPU Operator, and 20 minutes for NVSentinel.
+- **Stack waiting or failing:** read the `StackInstance` task phases with the jsonpath command in step 3. A task stuck in `Pending` is waiting on its `dependsOn` list; a `Degraded` task names its reason in `message`. Then check the tenant cluster's `StacksSynced` condition and the corresponding Argo CD applications. Task timeouts are in the table under [How the Stack works](#how-the-stack-works).
 - **`gpuready` stuck Progressing:** read the gate log, `kubectl -n gpu-stack logs -l app.kubernetes.io/instance=gpu-ready --tail=-1`. It names which step it is on. A long wait at step 2 is a driver still building; a long wait at step 3 means `ClusterPolicy` is ready but no GPU is allocatable yet, so check the device plugin pods and `kubectl get nodes -o json | jq '.items[].status.allocatable'`.
 - **Gate Job in `ImagePullBackOff`:** the GHCR package is still private, or the tag does not exist. See [Build the gate image](#build-the-gate-image).
 - **`gpu-smoke-test` Pending:** the gate passed, so a GPU was allocatable, but something else now holds it. Check for another pod with an `nvidia.com/gpu` limit, including a leftover `cuda-vectoradd` Job from step 5.
